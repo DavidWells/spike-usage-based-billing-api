@@ -1,0 +1,184 @@
+service: usage-billing-api
+
+frameworkVersion: '3'
+
+provider:
+  name: aws
+  runtime: nodejs20.x
+  region: us-east-1
+  stage: ${opt:stage, 'dev'}
+
+  # API Gateway logging configuration
+  logs:
+    restApi:
+      accessLogging: true
+      executionLogging: true
+      level: INFO
+      fullExecutionData: true
+
+  # Enable API Gateway CloudWatch Logs
+  tracing:
+    apiGateway: true
+
+  # IAM permissions for functions
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+          Resource: '*'
+
+functions:
+  example:
+    handler: src/handlers/example.handler
+    description: Example endpoint for usage tracking
+    events:
+      - http:
+          path: /example
+          method: get
+          private: true # Requires API key
+          cors: true
+
+  anotherExample:
+    handler: src/handlers/another.handler
+    description: Another example endpoint for usage tracking
+    events:
+      - http:
+          path: /data
+          method: post
+          private: true # Requires API key
+          cors: true
+
+resources:
+  Resources:
+    # API Gateway API Keys
+    ApiKey1:
+      Type: AWS::ApiGateway::ApiKey
+      Properties:
+        Name: ${self:service}-${self:provider.stage}-key-1
+        Description: API Key for customer 1
+        Enabled: true
+        StageKeys:
+          - RestApiId:
+              Ref: ApiGatewayRestApi
+            StageName: ${self:provider.stage}
+
+    ApiKey2:
+      Type: AWS::ApiGateway::ApiKey
+      Properties:
+        Name: ${self:service}-${self:provider.stage}-key-2
+        Description: API Key for customer 2
+        Enabled: true
+        StageKeys:
+          - RestApiId:
+              Ref: ApiGatewayRestApi
+            StageName: ${self:provider.stage}
+
+    # Usage Plan
+    UsagePlan:
+      Type: AWS::ApiGateway::UsagePlan
+      Properties:
+        UsagePlanName: ${self:service}-${self:provider.stage}-usage-plan
+        Description: Usage plan for API billing
+        ApiStages:
+          - ApiId:
+              Ref: ApiGatewayRestApi
+            Stage: ${self:provider.stage}
+        Quota:
+          Limit: 10000
+          Period: MONTH
+        Throttle:
+          BurstLimit: 200
+          RateLimit: 100
+
+    # Link API Key 1 to Usage Plan
+    UsagePlanKey1:
+      Type: AWS::ApiGateway::UsagePlanKey
+      Properties:
+        KeyId:
+          Ref: ApiKey1
+        KeyType: API_KEY
+        UsagePlanId:
+          Ref: UsagePlan
+
+    # Link API Key 2 to Usage Plan
+    UsagePlanKey2:
+      Type: AWS::ApiGateway::UsagePlanKey
+      Properties:
+        KeyId:
+          Ref: ApiKey2
+        KeyType: API_KEY
+        UsagePlanId:
+          Ref: UsagePlan
+
+    # CloudWatch Log Group for API Gateway Access Logs
+    ApiGatewayAccessLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: /aws/apigateway/${self:service}-${self:provider.stage}
+        RetentionInDays: 30
+
+    # Glue Database for Athena queries
+    UsageDatabase:
+      Type: AWS::Glue::Database
+      Properties:
+        CatalogId: !Ref AWS::AccountId
+        DatabaseInput:
+          Name: ${self:service}_${self:provider.stage}_usage_db
+          Description: Database for API usage tracking
+
+    # S3 Bucket for API Gateway Logs (Athena query source)
+    LogsBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:service}-${self:provider.stage}-api-logs-${aws:accountId}
+        LifecycleConfiguration:
+          Rules:
+            - Id: DeleteOldLogs
+              Status: Enabled
+              ExpirationInDays: 90
+
+    # S3 Bucket for Athena Query Results
+    AthenaResultsBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:service}-${self:provider.stage}-athena-results-${aws:accountId}
+
+  Outputs:
+    ApiKey1:
+      Description: API Key 1 ID
+      Value:
+        Ref: ApiKey1
+
+    ApiKey2:
+      Description: API Key 2 ID
+      Value:
+        Ref: ApiKey2
+
+    UsagePlanId:
+      Description: Usage Plan ID
+      Value:
+        Ref: UsagePlan
+
+    LogGroupName:
+      Description: CloudWatch Log Group for API Gateway
+      Value:
+        Ref: ApiGatewayAccessLogGroup
+
+    LogsBucketName:
+      Description: S3 Bucket for API Gateway Logs
+      Value:
+        Ref: LogsBucket
+
+    AthenaResultsBucketName:
+      Description: S3 Bucket for Athena Results
+      Value:
+        Ref: AthenaResultsBucket
+
+    GlueDatabaseName:
+      Description: Glue Database for Athena
+      Value:
+        Ref: UsageDatabase
