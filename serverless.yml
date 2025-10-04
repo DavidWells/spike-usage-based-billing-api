@@ -4,7 +4,7 @@ frameworkVersion: '3'
 
 provider:
   name: aws
-  runtime: nodejs20.x
+  runtime: nodejs22.x
   region: us-east-1
   stage: ${opt:stage, 'dev'}
 
@@ -205,7 +205,7 @@ resources:
           }
         FunctionConfig:
           Comment: Extracts API key from header and adds to querystring for logging
-          Runtime: cloudfront-js-1.0
+          Runtime: cloudfront-js-2.0
 
     # CloudFront Distribution
     CloudFrontDistribution:
