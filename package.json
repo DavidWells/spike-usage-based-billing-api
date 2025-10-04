@@ -1,0 +1,26 @@
+{
+  "name": "spike-usage-based-billing-api",
+  "version": "1.0.0",
+  "description": "Usage-based billing API using AWS API Gateway and serverless framework",
+  "main": "handler.js",
+  "scripts": {
+    "deploy": "serverless deploy",
+    "remove": "serverless remove",
+    "logs": "serverless logs -f example -t"
+  },
+  "keywords": [
+    "serverless",
+    "aws",
+    "api-gateway",
+    "usage-based-billing"
+  ],
+  "author": "David Wells",
+  "license": "MIT",
+  "dependencies": {
+    "@aws-sdk/client-athena": "^3.0.0",
+    "@aws-sdk/client-dynamodb": "^3.0.0"
+  },
+  "devDependencies": {
+    "serverless": "^3.0.0"
+  }
+}
