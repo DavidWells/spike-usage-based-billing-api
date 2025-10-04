@@ -1,12 +1,13 @@
 # Usage-Based Billing Tracking
 
-This document outlines the approach for tracking API usage for billing purposes using AWS API Gateway logs.
+This document outlines the approach for tracking API usage for billing purposes using AWS CloudFront access logs.
 
 ## Overview
 
 The API is configured with:
-- **API Gateway** with API keys for customer identification
-- **CloudWatch Logs** for capturing all API requests
+- **CloudFront Distribution** in front of API Gateway for edge-level request tracking
+- **CloudFront Access Logs** for capturing all requests at the edge (before API Gateway)
+- **CloudFront Function** to extract API keys from headers and add to query strings for logging
 - **AWS Athena** for querying usage data (recommended approach)
 - **S3** for long-term log storage
 
@@ -75,101 +76,151 @@ The API is configured with:
 
 ## Recommended Architecture
 
-For this project, we recommend **AWS Athena** with the following setup:
+For this project, we use **CloudFront + AWS Athena** with the following setup:
 
-1. **API Gateway → CloudWatch Logs** (enabled automatically)
-2. **CloudWatch Logs → S3** (via subscription filter)
-3. **AWS Glue** (creates table schema for logs)
-4. **AWS Athena** (queries S3 data)
+1. **Client → CloudFront Distribution** (with API key in x-api-key header)
+2. **CloudFront Function** (extracts API key and adds to query string for logging)
+3. **CloudFront → API Gateway → Lambda** (request processing)
+4. **CloudFront Access Logs → S3** (automatic, free logging)
+5. **AWS Glue Table** (defines schema for CloudFront logs)
+6. **AWS Athena** (queries S3 data using SQL)
 
 ## Implementation Status
 
 ### Completed
 - ✅ API Gateway with API keys configured
-- ✅ CloudWatch Logs enabled with full execution logging
-- ✅ S3 bucket created for log storage
+- ✅ CloudFront distribution in front of API Gateway
+- ✅ CloudFront access logging to S3 bucket
+- ✅ CloudFront Function to extract API key from headers
+- ✅ S3 bucket for CloudFront log storage (with lifecycle policy)
 - ✅ AWS Glue database created
+- ✅ AWS Glue table for CloudFront logs (with full schema)
 - ✅ Athena results bucket configured
 
 ### Next Steps (Not Implemented Yet)
-- ⏳ CloudWatch Logs subscription filter to export to S3
-- ⏳ AWS Glue crawler to auto-discover log schema
-- ⏳ Athena table creation for querying
-- ⏳ Example Athena queries for usage aggregation
+- ⏳ Add partitions to Glue table for efficient querying
 - ⏳ Lambda function for periodic usage calculation
 - ⏳ Actual billing integration (future phase)
 
 ## Example Usage Tracking Flow
 
-1. **Client makes API request** with API key
-2. **API Gateway logs request** to CloudWatch including:
-   - API Key ID
-   - Timestamp
-   - Request path
-   - Method
-   - Response size
-   - Latency
+1. **Client makes API request** to CloudFront with `x-api-key` header
+2. **CloudFront Function** extracts API key from header and adds to query string as `cf_api_key`
+3. **CloudFront logs request** to S3 including:
+   - API Key (from cf_api_key query param)
+   - Timestamp and date
+   - Request path (cs_uri_stem)
+   - Query string (cs_uri_query)
+   - Method (cs_method)
+   - Response size (sc_bytes)
+   - Request size (cs_bytes)
+   - Time taken
+   - Cache hit/miss status
+   - Edge location
    - Source IP
-3. **Logs are exported to S3** (via subscription filter)
-4. **Athena queries S3 data** to calculate usage:
+4. **Logs are written to S3** automatically (free, within minutes to hours)
+5. **Athena queries S3 data** to calculate usage:
    - Count requests per API key
    - Measure data transfer per API key
+   - Track cache efficiency
    - Calculate costs based on usage tiers
-5. **Billing system** uses query results to generate invoices
+6. **Billing system** uses query results to generate invoices
 
 ## Sample Athena Queries
 
-Once the Glue table is created, you can use queries like:
+Once the Glue table is created and logs are flowing, you can use queries like:
 
 ```sql
--- Count API calls per API key for the current month
+-- Extract API key from query string and count requests per key
 SELECT
-  apiKeyId,
+  regexp_extract(cs_uri_query, 'cf_api_key=([^&]+)', 1) as api_key,
   COUNT(*) as total_requests,
-  SUM(responseLatency) as total_latency_ms
-FROM api_gateway_logs
-WHERE year = 2025 AND month = 10
-GROUP BY apiKeyId
+  SUM(sc_bytes) / 1024 / 1024 as total_mb_sent,
+  SUM(cs_bytes) / 1024 / 1024 as total_mb_received,
+  AVG(time_taken) as avg_response_time
+FROM cloudfront_logs
+WHERE year = '2025' AND month = '10'
+  AND cs_uri_query LIKE '%cf_api_key=%'
+GROUP BY regexp_extract(cs_uri_query, 'cf_api_key=([^&]+)', 1)
 ORDER BY total_requests DESC;
 
--- Calculate data transfer per API key
+-- Calculate total data transfer per API key (for bandwidth billing)
 SELECT
-  apiKeyId,
-  SUM(requestSize + responseSize) / 1024 / 1024 as total_mb_transferred
-FROM api_gateway_logs
-WHERE year = 2025 AND month = 10
-GROUP BY apiKeyId;
-
--- Track usage by endpoint
-SELECT
-  apiKeyId,
-  resourcePath,
+  regexp_extract(cs_uri_query, 'cf_api_key=([^&]+)', 1) as api_key,
+  SUM(sc_bytes + cs_bytes) / 1024 / 1024 / 1024 as total_gb_transferred,
   COUNT(*) as request_count
-FROM api_gateway_logs
-WHERE year = 2025 AND month = 10
-GROUP BY apiKeyId, resourcePath;
+FROM cloudfront_logs
+WHERE year = '2025' AND month = '10'
+  AND cs_uri_query LIKE '%cf_api_key=%'
+GROUP BY regexp_extract(cs_uri_query, 'cf_api_key=([^&]+)', 1);
+
+-- Track usage by endpoint and API key
+SELECT
+  regexp_extract(cs_uri_query, 'cf_api_key=([^&]+)', 1) as api_key,
+  cs_uri_stem as endpoint,
+  cs_method as method,
+  COUNT(*) as request_count,
+  SUM(sc_bytes) / 1024 as total_kb_sent
+FROM cloudfront_logs
+WHERE year = '2025' AND month = '10'
+  AND cs_uri_query LIKE '%cf_api_key=%'
+GROUP BY
+  regexp_extract(cs_uri_query, 'cf_api_key=([^&]+)', 1),
+  cs_uri_stem,
+  cs_method
+ORDER BY request_count DESC;
+
+-- Cache efficiency per API key
+SELECT
+  regexp_extract(cs_uri_query, 'cf_api_key=([^&]+)', 1) as api_key,
+  x_edge_result_type as cache_status,
+  COUNT(*) as request_count,
+  COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (PARTITION BY regexp_extract(cs_uri_query, 'cf_api_key=([^&]+)', 1)) as percentage
+FROM cloudfront_logs
+WHERE year = '2025' AND month = '10'
+  AND cs_uri_query LIKE '%cf_api_key=%'
+GROUP BY
+  regexp_extract(cs_uri_query, 'cf_api_key=([^&]+)', 1),
+  x_edge_result_type;
+
+-- Add partitions for a specific day (run this after logs are generated)
+ALTER TABLE cloudfront_logs ADD IF NOT EXISTS
+PARTITION (year='2025', month='10', day='04')
+LOCATION 's3://your-bucket-name/cloudfront-logs/2025/10/04/';
 ```
 
 ## Cost Estimation
 
 Based on industry best practices for usage-based billing:
 
+**CloudFront Costs:**
+- Data transfer: $0.085 per GB (first 10TB, US)
+- HTTP/HTTPS requests: $0.0075-0.01 per 10,000 requests
+- CloudFront Functions: $0.10 per 1M invocations
+- **Logging: FREE** ✅
+
 **Athena Costs:**
 - $5 per TB of data scanned
 - With partitioning and compression: ~$0.01-0.10 per billing calculation
 - For 1M API calls/month: ~$1-5/month in query costs
 
-**CloudWatch Logs:**
-- $0.50 per GB ingested
-- $0.03 per GB stored per month
-- For 1M API calls/month (~10GB): ~$5-10/month
-
-**S3 Storage:**
+**S3 Storage (CloudFront Logs):**
 - $0.023 per GB/month (Standard)
-- Negligible for log storage (~$1-2/month)
+- CloudFront logs are smaller than API Gateway logs
+- For 1M API calls/month (~2-5GB): ~$0.05-0.15/month
+
+**Total Estimated Cost for 1M API calls/month:**
+- CloudFront: ~$10-20 (mainly data transfer)
+- Logging & Storage: ~$0.05-0.15
+- Athena queries: ~$1-5
+- **Total: ~$11-25/month**
+
+**Key Advantage:** CloudFront logging is FREE vs CloudWatch Logs at $0.50/GB ingestion
 
 ## References
 
-- [AWS API Gateway Logging Best Practices](https://docs.aws.amazon.com/apigateway/latest/developerguide/set-up-logging.html)
-- [AWS Athena for Log Analytics](https://docs.aws.amazon.com/athena/latest/ug/cloudwatch-logs.html)
+- [CloudFront Access Logs](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/AccessLogs.html)
+- [CloudFront Functions](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/cloudfront-functions.html)
+- [AWS Athena for Log Analytics](https://docs.aws.amazon.com/athena/latest/ug/cloudfront-logs.html)
 - [Usage Plans and API Keys](https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-api-usage-plans.html)
+- [Querying CloudFront Logs with Athena](https://docs.aws.amazon.com/athena/latest/ug/cloudfront-logs.html)

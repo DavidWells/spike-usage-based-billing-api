@@ -5,24 +5,29 @@ A proof-of-concept implementation for usage-based billing using AWS API Gateway,
 ## Features
 
 - 🔑 **API Key Management** - Two example API keys with usage plans
-- 📊 **Usage Tracking** - CloudWatch Logs capture all API requests with API key information
-- 🗄️ **Log Storage** - S3 buckets for long-term log storage
-- 🔍 **Athena Integration** - Query logs using SQL for usage calculation
+- ☁️ **CloudFront Distribution** - Edge-level request handling and logging
+- 📊 **Usage Tracking** - CloudFront access logs capture all requests with API key information
+- 🗄️ **Log Storage** - S3 buckets for long-term CloudFront log storage
+- 🔍 **Athena Integration** - Query CloudFront logs using SQL for usage calculation
+- 🔧 **CloudFront Functions** - Extract API keys from headers for logging
 - ⚡ **Serverless** - Built with the serverless framework (osls fork)
 - 🚀 **Node.js** - Lambda functions written in Node.js 20.x
 
 ## Architecture
 
 ```
-Client Request (with API Key)
+Client Request (with x-api-key header)
+        ↓
+  CloudFront Distribution
+  (CloudFront Function extracts API key)
         ↓
     API Gateway
         ↓
   Lambda Function
         ↓
-   CloudWatch Logs → S3 → AWS Athena
+CloudFront Access Logs → S3 → AWS Athena
         ↓
-  Usage Calculation
+  Usage Calculation (SQL queries)
 ```
 
 ## Prerequisites
@@ -71,17 +76,21 @@ aws apigateway get-api-keys --include-values
 
 ### Make a Request
 
+After deployment, use the **CloudFront domain** (not API Gateway directly) for all requests:
+
 ```bash
-# GET request
-curl -X GET https://your-api-id.execute-api.us-east-1.amazonaws.com/dev/example \
+# GET request via CloudFront
+curl -X GET https://your-cloudfront-id.cloudfront.net/example \
   -H "x-api-key: your-api-key-here"
 
-# POST request
-curl -X POST https://your-api-id.execute-api.us-east-1.amazonaws.com/dev/data \
+# POST request via CloudFront
+curl -X POST https://your-cloudfront-id.cloudfront.net/data \
   -H "x-api-key: your-api-key-here" \
   -H "Content-Type: application/json" \
   -d '{"test": "data"}'
 ```
+
+**Important:** Always use the CloudFront URL (not API Gateway URL directly) to ensure requests are logged for billing.
 
 ## Tracking Usage
 
@@ -153,34 +162,42 @@ Example endpoint that accepts and echoes JSON data.
 
 The `serverless.yml` includes:
 
-- **API Gateway Logging**: Full execution data and access logging enabled
+- **CloudFront Distribution**: Sits in front of API Gateway for edge-level logging
+- **CloudFront Function**: Extracts `x-api-key` header and adds to query string for logging
+- **CloudFront Access Logging**: Free logging to S3 with 90-day retention
 - **API Keys**: Two pre-configured API keys for testing
 - **Usage Plan**: Configured with quota (10,000 requests/month) and throttling (100 req/sec)
-- **CloudWatch Logs**: Retention period of 30 days
-- **S3 Buckets**: For log storage and Athena query results
+- **S3 Buckets**: For CloudFront log storage and Athena query results
 - **AWS Glue Database**: For Athena table definitions
+- **AWS Glue Table**: Pre-configured schema for CloudFront access logs
 
 ## Next Steps
 
-This spike focuses on the usage tracking mechanism. Future enhancements:
+This spike focuses on the CloudFront-based usage tracking mechanism. Future enhancements:
 
-1. **Complete Athena Setup**:
-   - Add CloudWatch Logs subscription filter to export to S3
-   - Create AWS Glue crawler for automatic schema discovery
-   - Define Athena tables for querying
+1. **Partition Management**:
+   - Automate partition creation for new days/months
+   - Use AWS Glue Crawler or Lambda to add partitions
 
 2. **Usage Aggregation**:
-   - Lambda function to run periodic usage calculations
+   - Lambda function to run periodic Athena queries
    - Store aggregated usage in DynamoDB or RDS
+   - Calculate bandwidth and request-based costs
 
 3. **Billing Integration**:
    - Integrate with Stripe, AWS Marketplace, or custom billing system
-   - Define pricing tiers and calculate costs
-   - Generate invoices
+   - Define pricing tiers (requests + bandwidth)
+   - Generate invoices based on CloudFront log data
 
 4. **Monitoring & Alerting**:
    - CloudWatch dashboards for usage metrics
    - Alerts for quota limits or anomalies
+   - Cache efficiency monitoring
+
+5. **Optimization**:
+   - Configure cache behaviors for different endpoints
+   - Implement cache invalidation strategies
+   - Fine-tune CloudFront Function performance
 
 ## Cleanup
 
@@ -190,7 +207,10 @@ Remove all deployed resources:
 serverless remove
 ```
 
-**Note**: S3 buckets must be empty before they can be deleted. You may need to manually empty the log buckets.
+**Note**:
+- S3 buckets must be empty before they can be deleted
+- You may need to manually empty the CloudFront log bucket
+- CloudFront distributions take 15-20 minutes to fully delete
 
 ## License
 
