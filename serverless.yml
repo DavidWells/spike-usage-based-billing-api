@@ -18,6 +18,42 @@ provider:
             - logs:CreateLogStream
             - logs:PutLogEvents
           Resource: '*'
+        - Effect: Allow
+          Action:
+            - athena:StartQueryExecution
+            - athena:GetQueryExecution
+            - athena:GetQueryResults
+            - athena:StopQueryExecution
+          Resource: '*'
+        - Effect: Allow
+          Action:
+            - glue:GetDatabase
+            - glue:GetTable
+            - glue:GetPartitions
+          Resource: '*'
+        - Effect: Allow
+          Action:
+            - s3:GetObject
+            - s3:ListBucket
+          Resource:
+            - !Sub arn:aws:s3:::${self:service}-${self:provider.stage}-cloudfront-logs-${aws:accountId}/*
+            - !Sub arn:aws:s3:::${self:service}-${self:provider.stage}-cloudfront-logs-${aws:accountId}
+        - Effect: Allow
+          Action:
+            - s3:PutObject
+            - s3:GetObject
+            - s3:ListBucket
+          Resource:
+            - !Sub arn:aws:s3:::${self:service}-${self:provider.stage}-athena-results-${aws:accountId}/*
+            - !Sub arn:aws:s3:::${self:service}-${self:provider.stage}-athena-results-${aws:accountId}
+        - Effect: Allow
+          Action:
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:GetItem
+            - dynamodb:Query
+          Resource:
+            - !GetAtt UsageMetricsTable.Arn
 
 functions:
   example:
@@ -38,6 +74,33 @@ functions:
           path: /data
           method: post
           private: true # Requires API key
+          cors: true
+
+  rollupUsage:
+    handler: src/handlers/rollup-usage.handler
+    description: Daily rollup of CloudFront logs into DynamoDB via Athena
+    timeout: 300 # 5 minutes
+    memorySize: 512
+    environment:
+      ATHENA_DATABASE: !Ref UsageDatabase
+      ATHENA_OUTPUT_BUCKET: !Sub s3://${AthenaResultsBucket}/
+      USAGE_METRICS_TABLE: !Ref UsageMetricsTable
+    events:
+      - schedule:
+          name: ${self:service}-${self:provider.stage}-daily-rollup
+          description: Daily usage rollup at 2 AM UTC
+          rate: cron(0 2 * * ? *)
+          enabled: true
+
+  getUsage:
+    handler: src/handlers/get-usage.handler
+    description: Get usage metrics for billing
+    environment:
+      USAGE_METRICS_TABLE: !Ref UsageMetricsTable
+    events:
+      - http:
+          path: /usage
+          method: get
           cors: true
 
 resources:
@@ -324,6 +387,28 @@ resources:
       Properties:
         BucketName: ${self:service}-${self:provider.stage}-athena-results-${aws:accountId}
 
+    # DynamoDB Table for Usage Metrics
+    UsageMetricsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:service}-${self:provider.stage}-usage-metrics
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: api_key
+            AttributeType: S
+          - AttributeName: date
+            AttributeType: S
+        KeySchema:
+          - AttributeName: api_key
+            KeyType: HASH
+          - AttributeName: date
+            KeyType: RANGE
+        StreamSpecification:
+          StreamViewType: NEW_AND_OLD_IMAGES
+        Tags:
+          - Key: Purpose
+            Value: UsageTracking
+
   Outputs:
     ApiKey1:
       Description: API Key 1 ID
@@ -368,3 +453,8 @@ resources:
       Description: Glue Table for CloudFront Logs
       Value:
         Ref: CloudFrontLogsTable
+
+    UsageMetricsTableName:
+      Description: DynamoDB Table for Usage Metrics
+      Value:
+        Ref: UsageMetricsTable

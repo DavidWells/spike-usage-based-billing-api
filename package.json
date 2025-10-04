@@ -16,7 +16,10 @@
   ],
   "author": "David Wells",
   "license": "MIT",
-  "dependencies": {},
+  "dependencies": {
+    "@aws-sdk/client-athena": "^3.0.0",
+    "@aws-sdk/client-dynamodb": "^3.0.0"
+  },
   "devDependencies": {
     "serverless": "github:oss-serverless/serverless"
   }
