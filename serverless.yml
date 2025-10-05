@@ -45,6 +45,7 @@ provider:
             - s3:PutObject
             - s3:GetObject
             - s3:ListBucket
+            - s3:GetBucketLocation
           Resource:
             - !Sub arn:aws:s3:::${self:service}-${self:provider.stage}-athena-results-${aws:accountId}/*
             - !Sub arn:aws:s3:::${self:service}-${self:provider.stage}-athena-results-${aws:accountId}
@@ -87,8 +88,8 @@ functions:
           cors: true
 
   rollupUsage:
-    handler: src/handlers/rollup-usage.handler
-    description: Daily rollup of CloudFront logs into DynamoDB via Athena
+    handler: src/handlers/rollup-realtime-usage.handler
+    description: Daily rollup of CloudFront real-time logs into DynamoDB via Athena
     timeout: 300 # 5 minutes
     memorySize: 512
     environment:

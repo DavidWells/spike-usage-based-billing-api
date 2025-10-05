@@ -87,15 +87,15 @@ async function executeAthenaQuery(query) {
 /**
  * Store detailed usage data in DynamoDB
  */
-async function storeUsageMetrics(apiKey, date, metrics) {
-  console.log('Storing metrics for', apiKey, date, metrics)
+async function storeUsageMetrics(apiKey, timestamp, metrics) {
+  console.log('Storing metrics for', apiKey, timestamp, metrics)
 
   await dynamodb.send(
     new PutItemCommand({
       TableName: USAGE_METRICS_TABLE,
       Item: {
         api_key: { S: apiKey },
-        date: { S: date },
+        date: { S: timestamp },
         request_count: { N: metrics.request_count.toString() },
         total_bytes_sent: { N: metrics.total_bytes_sent.toString() },
         total_bytes_received: { N: metrics.total_bytes_received.toString() },
@@ -118,7 +118,7 @@ function buildDailyUsageQuery(year, month, day) {
   return `
     WITH api_key_logs AS (
       SELECT
-        url_decode(regexp_extract(cs_headers, 'X-Api-Key:([^%]+)', 1)) as api_key,
+        api_key,
         sc_bytes,
         cs_bytes,
         time_taken,
@@ -129,7 +129,7 @@ function buildDailyUsageQuery(year, month, day) {
       WHERE year = '${year}'
         AND month = '${month}'
         AND day = '${day}'
-        AND cs_headers LIKE '%X-Api-Key:%'
+        AND api_key IS NOT NULL
     )
     SELECT
       api_key,
@@ -154,7 +154,7 @@ function buildBillingQuery(year, month, day) {
   return `
     WITH geo_usage AS (
       SELECT
-        url_decode(regexp_extract(cs_headers, 'X-Api-Key:([^%]+)', 1)) as api_key,
+        api_key,
         c_country,
         COUNT(*) as requests,
         SUM(sc_bytes) / 1024.0 / 1024.0 / 1024.0 as gb_transferred,
@@ -171,9 +171,9 @@ function buildBillingQuery(year, month, day) {
       WHERE year = '${year}'
         AND month = '${month}'
         AND day = '${day}'
-        AND cs_headers LIKE '%X-Api-Key:%'
+        AND api_key IS NOT NULL
       GROUP BY
-        url_decode(regexp_extract(cs_headers, 'X-Api-Key:([^%]+)', 1)),
+        api_key,
         c_country
     )
     SELECT
@@ -196,7 +196,7 @@ function buildCacheDiscountQuery(year, month, day) {
   return `
     WITH cache_metrics AS (
       SELECT
-        url_decode(regexp_extract(cs_headers, 'X-Api-Key:([^%]+)', 1)) as api_key,
+        api_key,
         x_edge_result_type,
         COUNT(*) as requests,
         SUM(sc_bytes) / 1024.0 / 1024.0 / 1024.0 as gb_transferred,
@@ -211,9 +211,9 @@ function buildCacheDiscountQuery(year, month, day) {
       WHERE year = '${year}'
         AND month = '${month}'
         AND day = '${day}'
-        AND cs_headers LIKE '%X-Api-Key:%'
+        AND api_key IS NOT NULL
       GROUP BY
-        url_decode(regexp_extract(cs_headers, 'X-Api-Key:([^%]+)', 1)),
+        api_key,
         x_edge_result_type
     )
     SELECT
@@ -247,7 +247,10 @@ module.exports.handler = async (event) => {
     const targetDate = event.date || getYesterdayDate()
     const { year, month, day } = parseDateComponents(targetDate)
 
-    console.log('Processing date:', targetDate, { year, month, day })
+    // Create ISO 8601 timestamp for DynamoDB (daily rollup at midnight UTC)
+    const timestamp = `${targetDate}T00:00:00Z`
+
+    console.log('Processing date:', targetDate, { year, month, day, timestamp })
 
     // Choose query type based on event parameter
     const queryType = event.queryType || 'daily_usage'
@@ -291,16 +294,16 @@ module.exports.handler = async (event) => {
           countriesServed
         ] = data
 
-        await storeUsageMetrics(apiKey, targetDate, {
-          request_count: parseInt(requestCount, 10),
-          total_bytes_sent: parseInt(totalBytesSent, 10),
-          total_bytes_received: parseInt(totalBytesReceived, 10),
-          avg_response_time_ms: parseFloat(avgResponseTime),
-          successful_requests: parseInt(successfulRequests, 10),
-          error_requests: parseInt(errorRequests, 10),
-          cache_hits: parseInt(cacheHits, 10),
-          cache_misses: parseInt(cacheMisses, 10),
-          countries_served: parseInt(countriesServed, 10)
+        await storeUsageMetrics(apiKey, timestamp, {
+          request_count: parseInt(requestCount, 10) || 0,
+          total_bytes_sent: parseInt(totalBytesSent, 10) || 0,
+          total_bytes_received: parseInt(totalBytesReceived, 10) || 0,
+          avg_response_time_ms: parseFloat(avgResponseTime) || 0,
+          successful_requests: parseInt(successfulRequests, 10) || 0,
+          error_requests: parseInt(errorRequests, 10) || 0,
+          cache_hits: parseInt(cacheHits, 10) || 0,
+          cache_misses: parseInt(cacheMisses, 10) || 0,
+          countries_served: parseInt(countriesServed, 10) || 0
         })
       }
     }
@@ -318,6 +321,7 @@ module.exports.handler = async (event) => {
       body: JSON.stringify({
         message: 'Usage rollup completed',
         date: targetDate,
+        timestamp,
         queryType,
         apiKeysProcessed: dataRows.length,
         results: results.length <= 10 ? results : results.slice(0, 10) // Limit to first 10 for response

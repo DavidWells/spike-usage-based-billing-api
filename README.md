@@ -9,7 +9,7 @@ A proof-of-concept implementation for usage-based billing using AWS API Gateway,
 - 📊 **Usage Tracking** - CloudFront access logs capture all requests with API key information
 - 🗄️ **Log Storage** - S3 buckets for long-term CloudFront log storage
 - 🔍 **Athena Integration** - Query CloudFront logs using SQL for usage calculation
-- 🔧 **CloudFront Functions** - Extract API keys from headers for logging
+- 🔄 **Real-time Processing** - Kinesis Firehose with Lambda transformation to Parquet
 - ⚡ **Serverless** - Built with the serverless framework (osls fork)
 - 🚀 **Node.js** - Lambda functions written in Node.js 20.x
 
@@ -19,20 +19,25 @@ A proof-of-concept implementation for usage-based billing using AWS API Gateway,
 Client Request (with x-api-key header)
         ↓
   CloudFront Distribution
-  (CloudFront Function extracts API key)
+                        ↓
+                  CloudFront Real-time Logs → Kinesis Stream
+                        ↓
+                  Kinesis Firehose (with Lambda transformation)
+                        ↓
+                  S3 (Parquet format, partitioned by date)
+                        ↓
+                  AWS Athena (SQL queries with api_key column)
+                        ↓
+                  DynamoDB (aggregated usage metrics)
         ↓
     API Gateway
         ↓
   Lambda Function
-        ↓
-CloudFront Access Logs → S3 → AWS Athena
-        ↓
-  Usage Calculation (SQL queries)
 ```
 
 ## Prerequisites
 
-- Node.js 18+ and npm
+- Node.js 22+ and npm
 - AWS CLI configured with appropriate credentials
 - AWS account with permissions for:
   - API Gateway
@@ -123,20 +128,21 @@ node scripts/query-usage.js --date 2025-10-05 --cache-discount
 
 ### Athena SQL Queries
 
-Extract API key from headers:
+Query usage by API key:
 
 ```sql
 SELECT
   FROM_UNIXTIME(timestamp/1000) as request_time,
-  url_decode(regexp_extract(cs_headers, 'X-Api-Key:([^%]+)', 1)) as api_key,
+  api_key,
   cs_uri_stem,
   sc_bytes,
-  sc_status
+  sc_status,
+  x_edge_result_type
 FROM cloudfront_realtime_logs
 WHERE year = '2025'
   AND month = '10'
   AND day = '05'
-  AND cs_headers LIKE '%X-Api-Key:%'
+  AND api_key IS NOT NULL
 LIMIT 10
 ```
 
@@ -209,29 +215,23 @@ Example endpoint that accepts and echoes JSON data.
 
 The `serverless.yml` includes:
 
-- **CloudFront Distribution**: Sits in front of API Gateway for edge-level logging
-- **CloudFront Function**: Extracts `x-api-key` header and adds to query string for logging
-- **CloudFront Access Logging**: Free logging to S3 with 90-day retention
+- **CloudFront Distribution**: Sits in front of API Gateway with real-time logging
+- **CloudFront Real-time Logs**: Captures all requests with headers to Kinesis
+- **Kinesis Stream**: Receives real-time CloudFront logs
+- **Kinesis Firehose**: Transforms and delivers logs to S3 in Parquet format
+- **Lambda Transformation**: Extracts API key from headers during Firehose processing
 - **API Keys**: Two pre-configured API keys for testing
 - **Usage Plan**: Configured with quota (10,000 requests/month) and throttling (100 req/sec)
-- **S3 Buckets**: For CloudFront log storage and Athena query results
+- **S3 Buckets**: For real-time logs (Parquet), standard logs, and Athena results
 - **AWS Glue Database**: For Athena table definitions
-- **AWS Glue Table**: Pre-configured schema for CloudFront access logs
+- **AWS Glue Tables**: Pre-configured schemas with partition projection
+- **DynamoDB Table**: Stores aggregated daily usage metrics by API key
 
 ## Next Steps
 
 This spike focuses on the CloudFront-based usage tracking mechanism. Future enhancements:
 
-1. **Partition Management**:
-   - Automate partition creation for new days/months
-   - Use AWS Glue Crawler or Lambda to add partitions
-
-2. **Usage Aggregation**:
-   - Lambda function to run periodic Athena queries
-   - Store aggregated usage in DynamoDB or RDS
-   - Calculate bandwidth and request-based costs
-
-3. **Billing Integration**:
+1. **Billing Integration**:
    - Integrate with Stripe, AWS Marketplace, or custom billing system
    - Define pricing tiers (requests + bandwidth)
    - Generate invoices based on CloudFront log data
@@ -248,7 +248,14 @@ This spike focuses on the CloudFront-based usage tracking mechanism. Future enha
 
 ## Cleanup
 
-Remove all deployed resources:
+Before removing the stack, empty all S3 buckets:
+
+```bash
+# Empty all buckets (requires --confirm flag)
+node scripts/teardown.js --confirm
+```
+
+Then remove all deployed resources:
 
 ```bash
 serverless remove
@@ -256,7 +263,7 @@ serverless remove
 
 **Note**:
 - S3 buckets must be empty before they can be deleted
-- You may need to manually empty the CloudFront log bucket
+- The teardown script empties all three buckets (CloudFront logs, real-time logs, Athena results)
 - CloudFront distributions take 15-20 minutes to fully delete
 
 ## License
