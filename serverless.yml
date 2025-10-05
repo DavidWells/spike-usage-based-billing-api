@@ -261,20 +261,48 @@ resources:
         Fields:
           - timestamp
           - c-ip
+          - s-ip
           - time-to-first-byte
           - sc-status
           - sc-bytes
           - cs-method
           - cs-protocol
+          - cs-host
           - cs-uri-stem
           - cs-uri-query
-          - cs-headers
+          - cs-bytes
           - x-edge-location
           - x-edge-request-id
           - x-host-header
+          - time-taken
           - cs-protocol-version
-          - cs-bytes
+          - c-ip-version
+          - cs-user-agent
+          - cs-referer
+          - cs-cookie
           - x-edge-response-result-type
+          - x-forwarded-for
+          - ssl-protocol
+          - ssl-cipher
+          - x-edge-result-type
+          - fle-encrypted-fields
+          - fle-status
+          - sc-content-type
+          - sc-content-len
+          - sc-range-start
+          - sc-range-end
+          - c-port
+          - x-edge-detailed-result-type
+          - c-country
+          - cs-accept-encoding
+          - cs-accept
+          - cache-behavior-path-pattern
+          - cs-headers
+          - cs-header-names
+          - cs-headers-count
+          - origin-fbl
+          - origin-lbl
+          - asn
         SamplingRate: 100
 
     # IAM Role for Kinesis Firehose
@@ -318,6 +346,12 @@ resources:
                     - logs:CreateLogStream
                     - logs:PutLogEvents
                   Resource: '*'
+                - Effect: Allow
+                  Action:
+                    - glue:GetTable
+                    - glue:GetTableVersion
+                    - glue:GetTableVersions
+                  Resource: '*'
 
     # Kinesis Firehose Delivery Stream
     RealtimeLogsFirehose:
@@ -334,9 +368,23 @@ resources:
           Prefix: 'realtime-logs/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/'
           ErrorOutputPrefix: 'realtime-logs-errors/!{firehose:error-output-type}/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/'
           BufferingHints:
-            SizeInMBs: 5
+            SizeInMBs: 128
             IntervalInSeconds: 300
-          CompressionFormat: GZIP
+          CompressionFormat: UNCOMPRESSED
+          DataFormatConversionConfiguration:
+            Enabled: true
+            SchemaConfiguration:
+              DatabaseName: !Ref UsageDatabase
+              TableName: !Ref RealtimeLogsTable
+              RoleARN: !GetAtt FirehoseDeliveryRole.Arn
+              Region: !Ref AWS::Region
+            InputFormatConfiguration:
+              Deserializer:
+                OpenXJsonSerDe: {}
+            OutputFormatConfiguration:
+              Serializer:
+                ParquetSerDe:
+                  Compression: SNAPPY
           CloudWatchLoggingOptions:
             Enabled: true
             LogGroupName: !Sub /aws/kinesisfirehose/${self:service}-${self:provider.stage}-realtime-logs
@@ -608,17 +656,19 @@ resources:
             'storage.location.template': !Sub 's3://${RealtimeLogsBucket}/realtime-logs/year=${!year}/month=${!month}/day=${!day}/'
           StorageDescriptor:
             Location: !Sub s3://${RealtimeLogsBucket}/realtime-logs/
-            InputFormat: org.apache.hadoop.mapred.TextInputFormat
-            OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+            InputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat
+            OutputFormat: org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat
             Compressed: true
             SerdeInfo:
-              SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+              SerializationLibrary: org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe
               Parameters:
                 serialization.format: '1'
             Columns:
               - Name: timestamp
                 Type: bigint
               - Name: c_ip
+                Type: string
+              - Name: s_ip
                 Type: string
               - Name: time_to_first_byte
                 Type: double
@@ -630,24 +680,78 @@ resources:
                 Type: string
               - Name: cs_protocol
                 Type: string
+              - Name: cs_host
+                Type: string
               - Name: cs_uri_stem
                 Type: string
               - Name: cs_uri_query
                 Type: string
-              - Name: cs_headers
-                Type: string
+              - Name: cs_bytes
+                Type: bigint
               - Name: x_edge_location
                 Type: string
               - Name: x_edge_request_id
                 Type: string
               - Name: x_host_header
                 Type: string
+              - Name: time_taken
+                Type: double
               - Name: cs_protocol_version
                 Type: string
-              - Name: cs_bytes
-                Type: bigint
+              - Name: c_ip_version
+                Type: string
+              - Name: cs_user_agent
+                Type: string
+              - Name: cs_referer
+                Type: string
+              - Name: cs_cookie
+                Type: string
               - Name: x_edge_response_result_type
                 Type: string
+              - Name: x_forwarded_for
+                Type: string
+              - Name: ssl_protocol
+                Type: string
+              - Name: ssl_cipher
+                Type: string
+              - Name: x_edge_result_type
+                Type: string
+              - Name: fle_encrypted_fields
+                Type: int
+              - Name: fle_status
+                Type: string
+              - Name: sc_content_type
+                Type: string
+              - Name: sc_content_len
+                Type: bigint
+              - Name: sc_range_start
+                Type: bigint
+              - Name: sc_range_end
+                Type: bigint
+              - Name: c_port
+                Type: int
+              - Name: x_edge_detailed_result_type
+                Type: string
+              - Name: c_country
+                Type: string
+              - Name: cs_accept_encoding
+                Type: string
+              - Name: cs_accept
+                Type: string
+              - Name: cache_behavior_path_pattern
+                Type: string
+              - Name: cs_headers
+                Type: string
+              - Name: cs_header_names
+                Type: string
+              - Name: cs_headers_count
+                Type: int
+              - Name: origin_fbl
+                Type: double
+              - Name: origin_lbl
+                Type: double
+              - Name: asn
+                Type: bigint
           PartitionKeys:
             - Name: year
               Type: string

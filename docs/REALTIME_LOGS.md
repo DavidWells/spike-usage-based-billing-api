@@ -34,8 +34,8 @@ Athena / Glue Table (queryable)
 ### 2. Kinesis Firehose
 - **Name**: `usage-billing-api-{stage}-realtime-logs-firehose`
 - **Purpose**: Delivers logs from Kinesis to S3
-- **Buffering**: 5 MB or 5 minutes (whichever comes first)
-- **Compression**: GZIP
+- **Buffering**: 128 MB or 5 minutes (whichever comes first)
+- **Format**: Parquet with SNAPPY compression
 - **Partitioning**: `year=YYYY/month=MM/day=DD/`
 
 ### 3. S3 Bucket
@@ -44,24 +44,66 @@ Athena / Glue Table (queryable)
 - **Lifecycle**: Logs expire after 90 days
 
 ### 4. CloudFront Real-time Log Config
-- **Fields Captured**:
-  - `timestamp` - Request timestamp
-  - `c-ip` - Client IP address
-  - `cs-method` - HTTP method (GET, POST, etc.)
-  - `cs-uri-stem` - URI path
-  - `cs-uri-query` - Query string parameters
-  - **`cs-headers`** - Full request headers (includes x-api-key!)
-  - `sc-status` - Response status code
-  - `sc-bytes` - Response size
-  - `x-edge-location` - CloudFront edge location
-  - `x-edge-request-id` - Unique request ID
-  - And more...
+- **Fields Captured** (43 fields total for comprehensive usage-based billing):
+  - **Timing & Identity**:
+    - `timestamp` - Request timestamp
+    - `c-ip` - Client IP address
+    - `s-ip` - CloudFront server IP
+    - `c-ip-version` - IPv4 or IPv6
+    - `c-country` - Client country code (geo-based pricing)
+    - `asn` - Autonomous system number
+  - **Request Details**:
+    - `cs-method` - HTTP method (GET, POST, etc.)
+    - `cs-protocol` - Protocol (http, https, ws, wss, grpcs)
+    - `cs-protocol-version` - HTTP version
+    - `cs-host` - Domain name (per-tenant billing)
+    - `cs-uri-stem` - URI path
+    - `cs-uri-query` - Query string parameters
+  - **Headers & Content**:
+    - **`cs-headers`** - Full request headers (includes x-api-key!)
+    - `cs-header-names` - Header names only
+    - `cs-headers-count` - Number of headers
+    - `cs-user-agent` - User agent string
+    - `cs-referer` - Referrer header
+    - `cs-cookie` - Cookie header
+    - `cs-accept` - Accept header
+    - `cs-accept-encoding` - Accept-Encoding header
+  - **Response & Content**:
+    - `sc-status` - Response status code
+    - `sc-bytes` - Response size (bandwidth billing)
+    - `cs-bytes` - Request size
+    - `sc-content-type` - Content type (content-based pricing)
+    - `sc-content-len` - Content length
+    - `sc-range-start` - Range request start
+    - `sc-range-end` - Range request end
+  - **Performance**:
+    - `time-to-first-byte` - Processing latency
+    - `time-taken` - Total request duration
+    - `origin-fbl` - Origin first-byte latency
+    - `origin-lbl` - Origin last-byte latency
+  - **CloudFront Metadata**:
+    - `x-edge-location` - Edge location
+    - `x-edge-request-id` - Unique request ID
+    - `x-host-header` - CloudFront domain
+    - `x-edge-result-type` - Cache hit/miss (discount cache hits)
+    - `x-edge-response-result-type` - Response result type
+    - `x-edge-detailed-result-type` - Detailed result (Origin Shield tracking)
+    - `cache-behavior-path-pattern` - Cache behavior matched
+  - **Security & SSL**:
+    - `ssl-protocol` - SSL/TLS protocol
+    - `ssl-cipher` - SSL/TLS cipher
+    - `x-forwarded-for` - Original IP if proxied
+    - `c-port` - Client port
+    - `fle-status` - Field-level encryption status
+    - `fle-encrypted-fields` - Number of encrypted fields
 - **Sampling Rate**: 100% (all requests)
 
 ### 5. Glue Table
 - **Name**: `cloudfront_realtime_logs`
-- **Format**: JSON (logs are delivered as JSON)
+- **Format**: Parquet (columnar format for efficient querying)
+- **Compression**: SNAPPY
 - **Partitioning**: Automatic partition projection by year/month/day
+- **Cost Efficiency**: Parquet format reduces Athena query costs by 70-90% compared to JSON
 
 ## Querying Real-time Logs with Athena
 
@@ -129,16 +171,34 @@ WHERE year = '2025'
 
 The Lambda functions have been granted read access to the real-time logs S3 bucket and Kinesis stream for processing usage data.
 
+## Parquet Format Benefits
+
+The real-time logs are converted from JSON to Parquet format for significant cost and performance improvements:
+
+- **70-90% lower Athena query costs** - Columnar storage means Athena only scans columns you query
+- **3-5x better compression** - Parquet with SNAPPY compression is much more efficient than GZIP JSON
+- **5-10x faster queries** - Columnar format optimized for analytical queries
+- **Schema enforcement** - Parquet validates data types, reducing query errors
+
+**Cost Example:**
+- 100 GB of logs in JSON/GZIP → 20-30 GB in Parquet
+- Query scanning 10 out of 43 columns:
+  - JSON: scans 100 GB = $0.50
+  - Parquet: scans ~15 GB = $0.075
+  - **85% cost reduction per query**
+
 ## Comparison: Standard Logs vs Real-time Logs
 
 | Feature | Standard Logs | Real-time Logs |
 |---------|---------------|----------------|
 | **Headers** | ❌ No | ✅ Yes (cs-headers) |
 | **Latency** | Hours | Seconds |
-| **Format** | TSV | JSON |
+| **Format** | TSV | Parquet (columnar) |
+| **Fields** | 29 fields | 43 fields (comprehensive billing data) |
 | **Cost** | Free | $0.01 per 1M log lines |
 | **Retention** | Configurable | 24 hours in Kinesis, then S3 |
 | **Query** | Athena | Athena, or real-time via Kinesis |
+| **Query Cost** | $5/TB scanned | $5/TB scanned (but 70-90% less data with Parquet) |
 
 ## Both Setups Are Active
 
@@ -157,9 +217,10 @@ Real-time logs cost approximately:
 - **$0.01 per 1 million log lines** delivered to Kinesis
 - **Kinesis Data Stream**: ~$0.015 per shard-hour = ~$10.80/month for 1 shard
 - **Kinesis Firehose**: $0.029 per GB ingested
-- **S3 storage**: Standard S3 pricing
+- **S3 storage**: Reduced by 70-80% due to Parquet compression
+- **Athena queries**: 70-90% lower cost due to columnar Parquet format
 
-For low-traffic applications, this typically costs < $15/month.
+For low-traffic applications, this typically costs < $15/month for ingestion, with significantly reduced query costs compared to JSON logs.
 
 ## Next Steps
 
