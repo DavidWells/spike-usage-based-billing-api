@@ -38,6 +38,8 @@ provider:
           Resource:
             - !Sub arn:aws:s3:::${self:service}-${self:provider.stage}-cloudfront-logs-${aws:accountId}/*
             - !Sub arn:aws:s3:::${self:service}-${self:provider.stage}-cloudfront-logs-${aws:accountId}
+            - !Sub arn:aws:s3:::${self:service}-${self:provider.stage}-cloudfront-realtime-logs-${aws:accountId}/*
+            - !Sub arn:aws:s3:::${self:service}-${self:provider.stage}-cloudfront-realtime-logs-${aws:accountId}
         - Effect: Allow
           Action:
             - s3:PutObject
@@ -54,6 +56,14 @@ provider:
             - dynamodb:Query
           Resource:
             - !GetAtt UsageMetricsTable.Arn
+        - Effect: Allow
+          Action:
+            - kinesis:GetRecords
+            - kinesis:GetShardIterator
+            - kinesis:DescribeStream
+            - kinesis:ListStreams
+          Resource:
+            - !GetAtt RealtimeLogsKinesisStream.Arn
 
 functions:
   example:
@@ -189,6 +199,149 @@ resources:
               Status: Enabled
               ExpirationInDays: 90
 
+    # S3 Bucket for CloudFront Real-time Logs
+    RealtimeLogsBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:service}-${self:provider.stage}-cloudfront-realtime-logs-${aws:accountId}
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          BlockPublicPolicy: true
+          IgnorePublicAcls: true
+          RestrictPublicBuckets: true
+        LifecycleConfiguration:
+          Rules:
+            - Id: DeleteOldRealtimeLogs
+              Status: Enabled
+              ExpirationInDays: 90
+
+    # Kinesis Data Stream for Real-time Logs
+    RealtimeLogsKinesisStream:
+      Type: AWS::Kinesis::Stream
+      Properties:
+        Name: ${self:service}-${self:provider.stage}-realtime-logs
+        ShardCount: 1
+        RetentionPeriodHours: 24
+
+    # IAM Role for CloudFront Real-time Logs
+    CloudFrontRealtimeLogRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: ${self:service}-${self:provider.stage}-cf-realtime-log-role
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: cloudfront.amazonaws.com
+              Action: sts:AssumeRole
+        Policies:
+          - PolicyName: CloudFrontRealtimeLogPolicy
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - kinesis:DescribeStreamSummary
+                    - kinesis:DescribeStream
+                    - kinesis:PutRecord
+                    - kinesis:PutRecords
+                  Resource: !GetAtt RealtimeLogsKinesisStream.Arn
+
+    # CloudFront Real-time Log Configuration
+    RealtimeLogConfig:
+      Type: AWS::CloudFront::RealtimeLogConfig
+      Properties:
+        Name: ${self:service}-${self:provider.stage}-realtime-log-config
+        EndPoints:
+          - StreamType: Kinesis
+            KinesisStreamConfig:
+              RoleARN: !GetAtt CloudFrontRealtimeLogRole.Arn
+              StreamARN: !GetAtt RealtimeLogsKinesisStream.Arn
+        Fields:
+          - timestamp
+          - c-ip
+          - time-to-first-byte
+          - sc-status
+          - sc-bytes
+          - cs-method
+          - cs-protocol
+          - cs-uri-stem
+          - cs-uri-query
+          - cs-headers
+          - x-edge-location
+          - x-edge-request-id
+          - x-host-header
+          - cs-protocol-version
+          - cs-bytes
+          - x-edge-response-result-type
+        SamplingRate: 100
+
+    # IAM Role for Kinesis Firehose
+    FirehoseDeliveryRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: ${self:service}-${self:provider.stage}-firehose-role
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: firehose.amazonaws.com
+              Action: sts:AssumeRole
+        Policies:
+          - PolicyName: FirehoseDeliveryPolicy
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - s3:AbortMultipartUpload
+                    - s3:GetBucketLocation
+                    - s3:GetObject
+                    - s3:ListBucket
+                    - s3:ListBucketMultipartUploads
+                    - s3:PutObject
+                  Resource:
+                    - !GetAtt RealtimeLogsBucket.Arn
+                    - !Sub ${RealtimeLogsBucket.Arn}/*
+                - Effect: Allow
+                  Action:
+                    - kinesis:DescribeStream
+                    - kinesis:GetShardIterator
+                    - kinesis:GetRecords
+                    - kinesis:ListShards
+                  Resource: !GetAtt RealtimeLogsKinesisStream.Arn
+                - Effect: Allow
+                  Action:
+                    - logs:CreateLogGroup
+                    - logs:CreateLogStream
+                    - logs:PutLogEvents
+                  Resource: '*'
+
+    # Kinesis Firehose Delivery Stream
+    RealtimeLogsFirehose:
+      Type: AWS::KinesisFirehose::DeliveryStream
+      Properties:
+        DeliveryStreamName: ${self:service}-${self:provider.stage}-realtime-logs-firehose
+        DeliveryStreamType: KinesisStreamAsSource
+        KinesisStreamSourceConfiguration:
+          KinesisStreamARN: !GetAtt RealtimeLogsKinesisStream.Arn
+          RoleARN: !GetAtt FirehoseDeliveryRole.Arn
+        ExtendedS3DestinationConfiguration:
+          BucketARN: !GetAtt RealtimeLogsBucket.Arn
+          RoleARN: !GetAtt FirehoseDeliveryRole.Arn
+          Prefix: 'realtime-logs/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/'
+          ErrorOutputPrefix: 'realtime-logs-errors/!{firehose:error-output-type}/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/'
+          BufferingHints:
+            SizeInMBs: 5
+            IntervalInSeconds: 300
+          CompressionFormat: GZIP
+          CloudWatchLoggingOptions:
+            Enabled: true
+            LogGroupName: !Sub /aws/kinesisfirehose/${self:service}-${self:provider.stage}-realtime-logs
+            LogStreamName: S3Delivery
+
     # Custom Cache Policy - preserves querystrings
     CustomCachePolicy:
       Type: AWS::CloudFront::CachePolicy
@@ -313,6 +466,7 @@ resources:
                 FunctionARN: !GetAtt CloudFrontApiKeyFunction.FunctionMetadata.FunctionARN
             CachePolicyId: !Ref CustomCachePolicy
             OriginRequestPolicyId: !Ref CustomOriginRequestPolicy
+            RealtimeLogConfigArn: !GetAtt RealtimeLogConfig.Arn
           # Custom error responses
           CustomErrorResponses:
             - ErrorCode: 403
@@ -430,6 +584,78 @@ resources:
             - Name: day
               Type: string
 
+    # Glue Table for CloudFront Real-time Logs
+    RealtimeLogsTable:
+      Type: AWS::Glue::Table
+      Properties:
+        CatalogId: !Ref AWS::AccountId
+        DatabaseName: !Ref UsageDatabase
+        TableInput:
+          Name: cloudfront_realtime_logs
+          Description: CloudFront real-time logs for usage billing with headers
+          TableType: EXTERNAL_TABLE
+          Parameters:
+            EXTERNAL: 'TRUE'
+            'projection.enabled': 'true'
+            'projection.year.type': 'integer'
+            'projection.year.range': '2024,2030'
+            'projection.month.type': 'integer'
+            'projection.month.range': '01,12'
+            'projection.month.digits': '2'
+            'projection.day.type': 'integer'
+            'projection.day.range': '01,31'
+            'projection.day.digits': '2'
+            'storage.location.template': !Sub 's3://${RealtimeLogsBucket}/realtime-logs/year=${!year}/month=${!month}/day=${!day}/'
+          StorageDescriptor:
+            Location: !Sub s3://${RealtimeLogsBucket}/realtime-logs/
+            InputFormat: org.apache.hadoop.mapred.TextInputFormat
+            OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+            Compressed: true
+            SerdeInfo:
+              SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+              Parameters:
+                serialization.format: '1'
+            Columns:
+              - Name: timestamp
+                Type: bigint
+              - Name: c_ip
+                Type: string
+              - Name: time_to_first_byte
+                Type: double
+              - Name: sc_status
+                Type: int
+              - Name: sc_bytes
+                Type: bigint
+              - Name: cs_method
+                Type: string
+              - Name: cs_protocol
+                Type: string
+              - Name: cs_uri_stem
+                Type: string
+              - Name: cs_uri_query
+                Type: string
+              - Name: cs_headers
+                Type: string
+              - Name: x_edge_location
+                Type: string
+              - Name: x_edge_request_id
+                Type: string
+              - Name: x_host_header
+                Type: string
+              - Name: cs_protocol_version
+                Type: string
+              - Name: cs_bytes
+                Type: bigint
+              - Name: x_edge_response_result_type
+                Type: string
+          PartitionKeys:
+            - Name: year
+              Type: string
+            - Name: month
+              Type: string
+            - Name: day
+              Type: string
+
     # S3 Bucket for Athena Query Results
     AthenaResultsBucket:
       Type: AWS::S3::Bucket
@@ -503,7 +729,31 @@ resources:
       Value:
         Ref: CloudFrontLogsTable
 
+    RealtimeLogsTableName:
+      Description: Glue Table for CloudFront Real-time Logs
+      Value:
+        Ref: RealtimeLogsTable
+
     UsageMetricsTableName:
       Description: DynamoDB Table for Usage Metrics
       Value:
         Ref: UsageMetricsTable
+
+    RealtimeLogsBucketName:
+      Description: S3 Bucket for CloudFront Real-time Logs
+      Value:
+        Ref: RealtimeLogsBucket
+
+    RealtimeLogsKinesisStreamName:
+      Description: Kinesis Stream for Real-time Logs
+      Value:
+        Ref: RealtimeLogsKinesisStream
+
+    RealtimeLogsFirehoseName:
+      Description: Kinesis Firehose for Real-time Logs
+      Value:
+        Ref: RealtimeLogsFirehose
+
+    RealtimeLogConfigArn:
+      Description: CloudFront Real-time Log Configuration ARN
+      Value: !GetAtt RealtimeLogConfig.Arn
