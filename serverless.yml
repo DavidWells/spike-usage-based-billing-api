@@ -108,6 +108,7 @@ resources:
     # API Gateway API Keys
     ApiKey1:
       Type: AWS::ApiGateway::ApiKey
+      DependsOn: ApiGatewayRestApi
       Properties:
         Name: ${self:service}-${self:provider.stage}-key-1
         Description: API Key for customer 1
@@ -119,6 +120,7 @@ resources:
 
     ApiKey2:
       Type: AWS::ApiGateway::ApiKey
+      DependsOn: ApiGatewayRestApi
       Properties:
         Name: ${self:service}-${self:provider.stage}-key-2
         Description: API Key for customer 2
@@ -131,6 +133,7 @@ resources:
     # Usage Plan
     UsagePlan:
       Type: AWS::ApiGateway::UsagePlan
+      DependsOn: ApiGatewayRestApi
       Properties:
         UsagePlanName: ${self:service}-${self:provider.stage}-usage-plan
         Description: Usage plan for API billing
@@ -148,6 +151,7 @@ resources:
     # Link API Key 1 to Usage Plan
     UsagePlanKey1:
       Type: AWS::ApiGateway::UsagePlanKey
+      DependsOn: ApiGatewayRestApi
       Properties:
         KeyId:
           Ref: ApiKey1
@@ -158,6 +162,7 @@ resources:
     # Link API Key 2 to Usage Plan
     UsagePlanKey2:
       Type: AWS::ApiGateway::UsagePlanKey
+      DependsOn: ApiGatewayRestApi
       Properties:
         KeyId:
           Ref: ApiKey2
@@ -184,6 +189,47 @@ resources:
               Status: Enabled
               ExpirationInDays: 90
 
+    # Custom Cache Policy - preserves querystrings
+    CustomCachePolicy:
+      Type: AWS::CloudFront::CachePolicy
+      Properties:
+        CachePolicyConfig:
+          Name: ${self:service}-${self:provider.stage}-no-cache-preserve-qs
+          Comment: Disables caching, preserves querystrings for logging
+          DefaultTTL: 1
+          MaxTTL: 31536000
+          MinTTL: 0
+          ParametersInCacheKeyAndForwardedToOrigin:
+            EnableAcceptEncodingGzip: false
+            EnableAcceptEncodingBrotli: false
+            HeadersConfig:
+              HeaderBehavior: whitelist
+              # These are the headers that are custom and forwarded to origin
+              Headers:
+                - Authorization
+                - x-api-key
+                - foo
+            CookiesConfig:
+              CookieBehavior: none
+            QueryStringsConfig:
+              QueryStringBehavior: all  # Key difference - preserves querystrings
+
+    # Custom Origin Request Policy - forwards x-api-key header
+    CustomOriginRequestPolicy:
+      Type: AWS::CloudFront::OriginRequestPolicy
+      Properties:
+        OriginRequestPolicyConfig:
+          Name: ${self:service}-${self:provider.stage}-origin-policy
+          Comment: Forward API key header to origin
+          HeadersConfig:
+            HeaderBehavior: allExcept
+            Headers:
+              - Host
+          CookiesConfig:
+            CookieBehavior: all
+          QueryStringsConfig:
+            QueryStringBehavior: all
+
     # CloudFront Function to extract API key for logging
     CloudFrontApiKeyFunction:
       Type: AWS::CloudFront::Function
@@ -195,10 +241,18 @@ resources:
             var request = event.request;
             var headers = request.headers;
 
-            // Extract API key from x-api-key header
-            var apiKey = headers['x-api-key'] ? headers['x-api-key'].value : 'no-key';
+            // CloudFront normalizes all header names to lowercase
+            var apiKey = 'no-key';
+            if (headers['x-api-key']) {
+              apiKey = headers['x-api-key'].value;
+            }
 
-            // Add API key to querystring for CloudFront logging
+            // Initialize querystring if it doesn't exist
+            if (!request.querystring) {
+              request.querystring = {};
+            }
+
+            // Add API key to querystring for logging
             request.querystring['cf_api_key'] = { value: apiKey };
 
             return request;
@@ -257,13 +311,8 @@ resources:
             FunctionAssociations:
               - EventType: viewer-request
                 FunctionARN: !GetAtt CloudFrontApiKeyFunction.FunctionMetadata.FunctionARN
-
-            # Cache policy - allow API key header to pass through
-            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad  # CachingDisabled managed policy
-
-            # Origin request policy - forward all headers including x-api-key
-            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac  # AllViewerExceptHostHeader managed policy
-
+            CachePolicyId: !Ref CustomCachePolicy
+            OriginRequestPolicyId: !Ref CustomOriginRequestPolicy
           # Custom error responses
           CustomErrorResponses:
             - ErrorCode: 403
@@ -410,12 +459,12 @@ resources:
             Value: UsageTracking
 
   Outputs:
-    ApiKey1:
+    ApiKeyId1:
       Description: API Key 1 ID
       Value:
         Ref: ApiKey1
 
-    ApiKey2:
+    ApiKeyId2:
       Description: API Key 2 ID
       Value:
         Ref: ApiKey2
