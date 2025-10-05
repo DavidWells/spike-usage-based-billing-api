@@ -94,11 +94,58 @@ curl -X POST https://your-cloudfront-id.cloudfront.net/data \
 
 ## Tracking Usage
 
-See [USAGE_TRACKING.md](./USAGE_TRACKING.md) for detailed information on:
-- Log querying options (Athena, CloudWatch Insights, etc.)
-- Architecture recommendations
-- Example Athena queries
-- Cost estimations
+### Real-time Logs with API Key Extraction ✅
+
+The system now includes **CloudFront real-time logs** with full header capture, enabling accurate usage-based billing by API key.
+
+**Key Features:**
+- ✅ Captures `X-Api-Key` header from requests
+- ✅ Parquet format (70-90% cost reduction vs JSON)
+- ✅ 43 comprehensive billing fields
+- ✅ Automatic partition projection
+- ✅ Near real-time delivery (< 30 seconds)
+
+### Quick Usage Queries
+
+```bash
+# Query today's usage for all API keys
+node scripts/query-usage.js --date 2025-10-05
+
+# Query specific API key
+node scripts/query-usage.js --date 2025-10-05 --api-key YOUR_API_KEY
+
+# Calculate billing with geographic pricing
+node scripts/query-usage.js --date 2025-10-05 --billing
+
+# Calculate with cache hit discounts (40% off for cache hits)
+node scripts/query-usage.js --date 2025-10-05 --cache-discount
+```
+
+### Athena SQL Queries
+
+Extract API key from headers:
+
+```sql
+SELECT
+  FROM_UNIXTIME(timestamp/1000) as request_time,
+  url_decode(regexp_extract(cs_headers, 'X-Api-Key:([^%]+)', 1)) as api_key,
+  cs_uri_stem,
+  sc_bytes,
+  sc_status
+FROM cloudfront_realtime_logs
+WHERE year = '2025'
+  AND month = '10'
+  AND day = '05'
+  AND cs_headers LIKE '%X-Api-Key:%'
+LIMIT 10
+```
+
+### Documentation
+
+- **[ATHENA_QUERIES.md](./docs/ATHENA_QUERIES.md)** - 14 comprehensive query examples
+- **[REALTIME_LOGS.md](./docs/REALTIME_LOGS.md)** - Real-time logs architecture
+- **[scripts/README.md](./scripts/README.md)** - CLI tool usage guide
+- **[USAGE_TRACKING.md](./USAGE_TRACKING.md)** - Detailed usage tracking options
 
 ### Quick Start: View Logs
 

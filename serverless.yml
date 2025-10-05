@@ -113,6 +113,12 @@ functions:
           method: get
           cors: true
 
+  transformRealtimeLogs:
+    handler: src/handlers/transform-realtime-logs.handler
+    description: Transform CloudFront real-time logs from TSV to JSON for Parquet
+    timeout: 60
+    memorySize: 128
+
 resources:
   Resources:
     # API Gateway API Keys
@@ -258,6 +264,8 @@ resources:
             KinesisStreamConfig:
               RoleARN: !GetAtt CloudFrontRealtimeLogRole.Arn
               StreamARN: !GetAtt RealtimeLogsKinesisStream.Arn
+        # capture all requests at 100%
+        SamplingRate: 100
         Fields:
           - timestamp
           - c-ip
@@ -303,7 +311,6 @@ resources:
           - origin-fbl
           - origin-lbl
           - asn
-        SamplingRate: 100
 
     # IAM Role for Kinesis Firehose
     FirehoseDeliveryRole:
@@ -352,6 +359,11 @@ resources:
                     - glue:GetTableVersion
                     - glue:GetTableVersions
                   Resource: '*'
+                - Effect: Allow
+                  Action:
+                    - lambda:InvokeFunction
+                    - lambda:GetFunctionConfiguration
+                  Resource: !GetAtt TransformRealtimeLogsLambdaFunction.Arn
 
     # Kinesis Firehose Delivery Stream
     RealtimeLogsFirehose:
@@ -385,6 +397,13 @@ resources:
               Serializer:
                 ParquetSerDe:
                   Compression: SNAPPY
+          ProcessingConfiguration:
+            Enabled: true
+            Processors:
+              - Type: Lambda
+                Parameters:
+                  - ParameterName: LambdaArn
+                    ParameterValue: !GetAtt TransformRealtimeLogsLambdaFunction.Arn
           CloudWatchLoggingOptions:
             Enabled: true
             LogGroupName: !Sub /aws/kinesisfirehose/${self:service}-${self:provider.stage}-realtime-logs
@@ -431,36 +450,37 @@ resources:
           QueryStringsConfig:
             QueryStringBehavior: all
 
+    # This didn't work, modified querystring not in the basic logs
     # CloudFront Function to extract API key for logging
-    CloudFrontApiKeyFunction:
-      Type: AWS::CloudFront::Function
-      Properties:
-        Name: ${self:service}-${self:provider.stage}-api-key-extractor
-        AutoPublish: true
-        FunctionCode: |
-          function handler(event) {
-            var request = event.request;
-            var headers = request.headers;
+    # CloudFrontApiKeyFunction:
+    #   Type: AWS::CloudFront::Function
+    #   Properties:
+    #     Name: ${self:service}-${self:provider.stage}-api-key-extractor
+    #     AutoPublish: true
+    #     FunctionCode: |
+    #       function handler(event) {
+    #         var request = event.request;
+    #         var headers = request.headers;
 
-            // CloudFront normalizes all header names to lowercase
-            var apiKey = 'no-key';
-            if (headers['x-api-key']) {
-              apiKey = headers['x-api-key'].value;
-            }
+    #         // CloudFront normalizes all header names to lowercase
+    #         var apiKey = 'no-key';
+    #         if (headers['x-api-key']) {
+    #           apiKey = headers['x-api-key'].value;
+    #         }
 
-            // Initialize querystring if it doesn't exist
-            if (!request.querystring) {
-              request.querystring = {};
-            }
+    #         // Initialize querystring if it doesn't exist
+    #         if (!request.querystring) {
+    #           request.querystring = {};
+    #         }
 
-            // Add API key to querystring for logging
-            request.querystring['cf_api_key'] = { value: apiKey };
+    #         // Add API key to querystring for logging
+    #         request.querystring['cf_api_key'] = { value: apiKey };
 
-            return request;
-          }
-        FunctionConfig:
-          Comment: Extracts API key from header and adds to querystring for logging
-          Runtime: cloudfront-js-2.0
+    #         return request;
+    #       }
+    #     FunctionConfig:
+    #       Comment: Extracts API key from header and adds to querystring for logging
+    #       Runtime: cloudfront-js-2.0
 
     # CloudFront Distribution
     CloudFrontDistribution:
@@ -508,10 +528,10 @@ resources:
               - OPTIONS
             Compress: true
 
-            # Attach the API key extractor function
-            FunctionAssociations:
-              - EventType: viewer-request
-                FunctionARN: !GetAtt CloudFrontApiKeyFunction.FunctionMetadata.FunctionARN
+            # # Attach the API key extractor function
+            # FunctionAssociations:
+            #   - EventType: viewer-request
+            #     FunctionARN: !GetAtt CloudFrontApiKeyFunction.FunctionMetadata.FunctionARN
             CachePolicyId: !Ref CustomCachePolicy
             OriginRequestPolicyId: !Ref CustomOriginRequestPolicy
             RealtimeLogConfigArn: !GetAtt RealtimeLogConfig.Arn
@@ -547,7 +567,6 @@ resources:
           TableType: EXTERNAL_TABLE
           Parameters:
             EXTERNAL: 'TRUE'
-            'skip.header.line.count': '2'
           StorageDescriptor:
             Location: !Sub s3://${CloudFrontLogsBucket}/cloudfront-logs/
             InputFormat: org.apache.hadoop.mapred.TextInputFormat
@@ -557,6 +576,7 @@ resources:
               Parameters:
                 field.delim: "\t"
                 serialization.format: "\t"
+                skip.header.line.count: '2'
             Columns:
               - Name: date
                 Type: date
@@ -624,13 +644,6 @@ resources:
                 Type: bigint
               - Name: sc_range_end
                 Type: bigint
-          PartitionKeys:
-            - Name: year
-              Type: string
-            - Name: month
-              Type: string
-            - Name: day
-              Type: string
 
     # Glue Table for CloudFront Real-time Logs
     RealtimeLogsTable:
@@ -752,6 +765,8 @@ resources:
                 Type: double
               - Name: asn
                 Type: bigint
+              - Name: api_key
+                Type: string
           PartitionKeys:
             - Name: year
               Type: string

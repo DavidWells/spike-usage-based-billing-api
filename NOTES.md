@@ -108,3 +108,228 @@ This approach involves writing custom code to send log data to CloudWatch. While
 **Final Recommendation:**
 
 Stick with **logging at the origin via API Gateway**. It provides the most accurate and auditable data for a usage-based billing model where you charge customers for the resources they actually consume on your backend. This approach is simpler to implement, highly reliable, and easier to defend during a billing dispute.
+
+---
+
+## Querying Usage Data
+
+Now that we have real-time logs with the `X-Api-Key` header, we can query usage data by API key.
+
+### Quick Test Query
+
+Run this to verify data is flowing (update the date):
+
+```sql
+SELECT
+  FROM_UNIXTIME(timestamp/1000) as request_time,
+  cs_uri_stem,
+  url_decode(regexp_extract(cs_headers, 'X-Api-Key:([^%]+)', 1)) as api_key,
+  sc_status,
+  sc_bytes
+FROM cloudfront_realtime_logs
+WHERE year = '2025'
+  AND month = '10'
+  AND day = '05'
+  AND cs_headers LIKE '%X-Api-Key:%'
+LIMIT 10
+```
+
+### Daily Usage Summary by API Key
+
+```sql
+WITH api_key_logs AS (
+  SELECT
+    url_decode(regexp_extract(cs_headers, 'X-Api-Key:([^%]+)', 1)) as api_key,
+    sc_bytes,
+    cs_bytes,
+    time_taken,
+    sc_status,
+    c_country,
+    x_edge_result_type
+  FROM cloudfront_realtime_logs
+  WHERE year = '2025'
+    AND month = '10'
+    AND day = '05'
+    AND cs_headers LIKE '%X-Api-Key:%'
+)
+SELECT
+  api_key,
+  COUNT(*) as total_requests,
+  SUM(sc_bytes) as total_bytes_sent,
+  ROUND(AVG(time_taken), 2) as avg_response_time_ms,
+  COUNT_IF(sc_status = 200) as successful_requests,
+  COUNT_IF(sc_status >= 400) as error_requests
+FROM api_key_logs
+GROUP BY api_key
+ORDER BY total_requests DESC
+```
+
+### CLI Tool for Usage Queries
+
+Use the provided CLI tool to query usage data:
+
+```bash
+# Query today's usage for all API keys
+node scripts/query-usage.js --date 2025-10-05
+
+# Query usage for specific API key
+node scripts/query-usage.js --date 2025-10-05 --api-key pfCCh7ygOr8Gwv8BoGWHG3NO54Csd4aZ6tz1wHBx
+
+# Calculate billing with geographic pricing
+node scripts/query-usage.js --date 2025-10-05 --billing
+
+# Calculate billing with cache hit discounts
+node scripts/query-usage.js --date 2025-10-05 --cache-discount
+```
+
+### Lambda Handler for Automated Rollup
+
+The `rollup-realtime-usage` handler provides automated daily rollups with multiple query types:
+
+```javascript
+// Invoke with specific query type
+{
+  "date": "2025-10-05",
+  "queryType": "daily_usage"  // or "billing" or "cache_discount"
+}
+```
+
+### Understanding cs_headers Format
+
+The `cs_headers` field is URL-encoded with `%0A` as newline:
+
+```
+User-Agent:vscode-restclient%0AX-Api-Key:pfCCh7ygOr8Gwv8BoGWHG3NO54Csd4aZ6tz1wHBx%0A...
+```
+
+To extract the API key:
+1. Use `regexp_extract(cs_headers, 'X-Api-Key:([^%]+)', 1)` to capture value before `%0A`
+2. Use `url_decode()` to decode the result
+
+### Full Documentation
+
+See `/docs/ATHENA_QUERIES.md` for comprehensive query examples including:
+- Geographic-based pricing
+- Cache hit discounts
+- Performance-based pricing
+- Time-based pricing (peak vs off-peak)
+- Error analysis
+- Content-type distribution
+- And more...
+
+
+## Backfilling notes
+
+Here are the common approaches for backfilling Parquet data in S3:
+
+  1. Athena CTAS (Create Table As Select) - Easiest
+
+  Use Athena to read old data, transform it, and write new Parquet files:
+
+  -- Create new table with transformed data
+  CREATE TABLE cloudfront_realtime_logs_backfilled
+  WITH (
+    format = 'PARQUET',
+    parquet_compression = 'SNAPPY',
+    external_location = 's3://bucket/realtime-logs-backfilled/'
+  ) AS
+  SELECT
+    *,
+    url_decode(regexp_extract(cs_headers, 'X-Api-Key:([^%]+)', 1)) as api_key
+  FROM cloudfront_realtime_logs
+  WHERE year = '2025' AND month = '10' AND day = '05';
+
+  -- Then copy files from backfilled location to original location
+
+  Pros: No code, uses AthenaCons: Athena query costs, manual file moving
+
+  2. AWS Glue ETL Job - Most scalable
+
+  Create a Glue job to transform Parquet files:
+
+  # Glue PySpark script
+  df = glueContext.create_dynamic_frame.from_catalog(
+      database="usage_db",
+      table_name="cloudfront_realtime_logs"
+  )
+
+  # Add api_key column
+  def extract_api_key(headers):
+      # Extract logic here
+      pass
+
+  df = df.map(lambda x: {
+      **x,
+      'api_key': extract_api_key(x.get('cs_headers'))
+  })
+
+  glueContext.write_dynamic_frame.from_options(
+      frame=df,
+      connection_type="s3",
+      format="parquet",
+      connection_options={"path": "s3://bucket/output/"}
+  )
+
+  Pros: Handles large datasets, parallel processingCons: Glue costs, more complex setup
+
+  3. Node.js Script with Parquet libraries - Full control
+
+  Read/write Parquet locally:
+
+  const parquet = require('parquetjs')
+  const AWS = require('aws-sdk')
+  const s3 = new AWS.S3()
+
+  async function backfillFile(bucket, key) {
+    // Download file
+    const obj = await s3.getObject({Bucket: bucket, Key: key}).promise()
+
+    // Read Parquet
+    const reader = await parquet.ParquetReader.openBuffer(obj.Body)
+    const cursor = reader.getCursor()
+    let record = null
+    const records = []
+
+    // Transform each record
+    while (record = await cursor.next()) {
+      record.api_key = extractApiKey(record.cs_headers)
+      records.push(record)
+    }
+
+    // Write new Parquet
+    const schema = new parquet.ParquetSchema({...})
+    const writer = await parquet.ParquetWriter.openFile(schema, '/tmp/output.parquet')
+    for (const rec of records) {
+      await writer.appendRow(rec)
+    }
+    await writer.close()
+
+    // Upload back to S3
+    await s3.putObject({
+      Bucket: bucket,
+      Key: key,
+      Body: fs.readFileSync('/tmp/output.parquet')
+    }).promise()
+  }
+
+  Pros: Full control, can process locallyCons: Memory intensive for large files, slower
+
+  4. Lambda + S3 Batch Operations - Serverless
+
+  Trigger Lambda for each file via S3 Batch:
+
+  // Lambda that processes one Parquet file at a time
+  exports.handler = async (event) => {
+    const key = event.Records[0].s3.object.key
+    // Read, transform, write logic
+  }
+
+  Pros: Serverless, scalableCons: 15min Lambda timeout, complexity
+
+  Typical Workflow:
+
+  1. Read old Parquet files from S3
+  2. Add missing api_key column by extracting from cs_headers
+  3. Write new Parquet files
+  4. Replace old files or write to new location
+  5. Update table schema if needed
