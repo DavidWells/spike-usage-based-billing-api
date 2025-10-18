@@ -1,5 +1,6 @@
 [build]
   publish = "frontend"
+  command = "sleep 25 && echo 'Build complete'"
   
 [build.environment]
   NODE_VERSION = "22"
