@@ -17,7 +17,16 @@ const {
   GetQueryResultsCommand
 } = require('@aws-sdk/client-athena')
 
-const athena = new AthenaClient({ region: 'us-east-1' })
+const athena = new AthenaClient({ region: 'us-east-1',  logger: {
+    debug: () => {},
+    info: () => {},
+    warn: (msg) => {
+      if (!msg.includes('defaultProvider::fromEnv WARNING')) {
+        console.warn(msg)
+      }
+    },
+    error: console.error
+  } })
 
 // Configuration - update these based on your stack outputs
 const ATHENA_DATABASE = process.env.ATHENA_DATABASE || 'usage-billing-api_dev_usage_db'
@@ -169,15 +178,15 @@ function buildBillingQuery(year, month, day) {
   return `
     WITH usage_metrics AS (
       SELECT
-        url_decode(regexp_extract(cs_headers, 'X-Api-Key:([^%]+)', 1)) as api_key,
+        api_key,
         COUNT(*) as total_requests,
         SUM(sc_bytes) as total_bytes
       FROM cloudfront_realtime_logs
       WHERE year = '${year}'
         AND month = '${month}'
         AND day = '${day}'
-        AND cs_headers LIKE '%X-Api-Key:%'
-      GROUP BY url_decode(regexp_extract(cs_headers, 'X-Api-Key:([^%]+)', 1))
+        AND api_key IS NOT NULL
+      GROUP BY api_key
     )
     SELECT
       api_key,
@@ -198,7 +207,7 @@ function buildCacheDiscountQuery(year, month, day) {
   return `
     WITH cache_metrics AS (
       SELECT
-        url_decode(regexp_extract(cs_headers, 'X-Api-Key:([^%]+)', 1)) as api_key,
+        api_key,
         x_edge_result_type,
         COUNT(*) as requests,
         SUM(sc_bytes) / 1024.0 / 1024.0 / 1024.0 as gb_transferred,
@@ -212,9 +221,9 @@ function buildCacheDiscountQuery(year, month, day) {
       WHERE year = '${year}'
         AND month = '${month}'
         AND day = '${day}'
-        AND cs_headers LIKE '%X-Api-Key:%'
+        AND api_key IS NOT NULL
       GROUP BY
-        url_decode(regexp_extract(cs_headers, 'X-Api-Key:([^%]+)', 1)),
+        api_key,
         x_edge_result_type
     )
     SELECT

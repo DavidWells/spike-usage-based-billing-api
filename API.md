@@ -26,7 +26,7 @@ Here are the callable endpoints
 ```http
 # @name getExample
 GET {{baseUrl}}/example
-x-api-key: {{apiKey1}}
+x-api-key: {{apiKey2}}
 ```
 
 ### Post data to another example endpoint (requires API key)
@@ -35,7 +35,7 @@ x-api-key: {{apiKey1}}
 # @name postData
 POST {{baseUrl}}/data
 Content-Type: application/json
-x-api-key: {{apiKey1}}
+x-api-key: {{apiKey2}}
 
 {
   "message": "Test data for usage tracking",
